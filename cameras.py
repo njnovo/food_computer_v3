@@ -12,6 +12,9 @@ class CameraPair:
         self.height = height
         self.plant_count = plant_count
 
+        # Load calibration settings
+        self.calibration_settings = self._load_calibration_settings()
+
         # Initialize cameras using libcamera
         self.nir_cam = self._init_libcamera_camera(nir_port, "NIR")
         self.vis_cam = self._init_libcamera_camera(vis_port, "VIS")
@@ -33,6 +36,20 @@ class CameraPair:
         
         return port  # Return port number for libcamera
 
+    def _load_calibration_settings(self):
+        """Load calibration settings from file"""
+        calibration_file = "camera_calibration.json"
+        if os.path.exists(calibration_file):
+            try:
+                import json
+                with open(calibration_file, 'r') as f:
+                    settings = json.load(f)
+                print(f"Loaded calibration settings from {calibration_file}")
+                return settings
+            except Exception as e:
+                print(f"Failed to load calibration settings: {e}")
+        return {}
+
     def _capture_with_libcamera(self, port, output_file):
         """Capture a frame using libcamera-still"""
         try:
@@ -47,18 +64,20 @@ class CameraPair:
                 '--nopreview'
             ]
             
-            # Add exposure and gain settings for NIR camera (port 0)
-            if port == 0:  # NIR camera
+            # Use calibration settings if available, otherwise default settings
+            if hasattr(self, 'calibration_settings') and port in self.calibration_settings:
+                settings = self.calibration_settings[port]
                 cmd.extend([
-                    '--shutter', '200000',  # 0.2 second exposure (in microseconds)
-                    '--gain', '6.0',  # High gain
-                    '--ev', '4.0'  # High exposure compensation
+                    '--shutter', str(settings['shutter']),
+                    '--gain', str(settings['gain']),
+                    '--ev', str(settings['ev'])
                 ])
-            elif port == 1:  # VIS camera - reduce exposure to create contrast
+            else:
+                # Default settings - same for both cameras
                 cmd.extend([
-                    '--shutter', '10000',  # 0.01 second exposure (in microseconds)
-                    '--gain', '1.0',  # Low gain
-                    '--ev', '-2.0'  # Low exposure compensation
+                    '--shutter', '50000',  # 0.05 second exposure
+                    '--gain', '2.0',  # Moderate gain
+                    '--ev', '0.0'  # No exposure compensation
                 ])
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)

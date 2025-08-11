@@ -3,6 +3,7 @@ import numpy as np
 import time
 import subprocess
 import os
+import json
 
 class CameraCalibrator:
     def __init__(self, nir_port=0, vis_port=1, width=2028, height=1520):
@@ -10,9 +11,10 @@ class CameraCalibrator:
         self.vis_port = vis_port
         self.width = width
         self.height = height
+        self.target_ndvi = 1.0  # Target NDVI value for reference object
 
-    def capture_single_image(self, port, filename):
-        """Capture a single image from specified camera"""
+    def capture_single_image(self, port, filename, shutter=None, gain=None, ev=None):
+        """Capture a single image from specified camera with custom settings"""
         try:
             cmd = [
                 'libcamera-still',
@@ -24,7 +26,15 @@ class CameraCalibrator:
                 '--nopreview'
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            # Add custom settings if provided
+            if shutter:
+                cmd.extend(['--shutter', str(shutter)])
+            if gain:
+                cmd.extend(['--gain', str(gain)])
+            if ev:
+                cmd.extend(['--ev', str(ev)])
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
             
             if result.returncode != 0:
                 print(f"Error capturing from camera {port}: {result.stderr}")
@@ -74,6 +84,99 @@ class CameraCalibrator:
         
         return stats
 
+    def calculate_ndvi(self, nir_img, vis_img):
+        """Calculate NDVI from two images"""
+        nir_gray = cv2.cvtColor(nir_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        vis_gray = cv2.cvtColor(vis_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        
+        # Calculate NDVI
+        denom = nir_gray + vis_gray
+        denom[denom == 0] = 0.01  # prevent division by 0
+        ndvi = (nir_gray - vis_gray) / denom
+        
+        return ndvi
+
+    def find_optimal_settings(self):
+        """Find optimal camera settings to achieve target NDVI"""
+        print(f"\n=== Finding Optimal Settings for NDVI = {self.target_ndvi} ===")
+        print("Point cameras at your NDVI=1 reference object, then press Enter...")
+        input()
+        
+        # Test different exposure settings
+        shutter_values = [10000, 50000, 100000, 200000, 500000]  # microseconds
+        gain_values = [1.0, 2.0, 4.0, 6.0, 8.0]
+        ev_values = [-2.0, 0.0, 2.0, 4.0, 6.0]
+        
+        best_settings = {}
+        best_ndvi_diff = float('inf')
+        
+        for shutter in shutter_values:
+            for gain in gain_values:
+                for ev in ev_values:
+                    print(f"\nTesting: shutter={shutter}, gain={gain}, ev={ev}")
+                    
+                    # Capture with these settings
+                    nir_file = f"/tmp/nir_test_{int(time.time())}.jpg"
+                    vis_file = f"/tmp/vis_test_{int(time.time())}.jpg"
+                    
+                    nir_result = self.capture_single_image(self.nir_port, nir_file, shutter, gain, ev)
+                    vis_result = self.capture_single_image(self.vis_port, vis_file, shutter, gain, ev)
+                    
+                    if nir_result and vis_result:
+                        # Calculate NDVI
+                        nir_img = cv2.imread(nir_file)
+                        vis_img = cv2.imread(vis_file)
+                        
+                        if nir_img is not None and vis_img is not None:
+                            ndvi = self.calculate_ndvi(nir_img, vis_img)
+                            mean_ndvi = np.mean(ndvi)
+                            ndvi_diff = abs(mean_ndvi - self.target_ndvi)
+                            
+                            print(f"  Mean NDVI: {mean_ndvi:.3f}, Difference from target: {ndvi_diff:.3f}")
+                            
+                            if ndvi_diff < best_ndvi_diff:
+                                best_ndvi_diff = ndvi_diff
+                                best_settings = {
+                                    self.nir_port: {'shutter': shutter, 'gain': gain, 'ev': ev},
+                                    self.vis_port: {'shutter': shutter, 'gain': gain, 'ev': ev}
+                                }
+                                print(f"  *** New best settings! ***")
+                    
+                    # Clean up
+                    try:
+                        if os.path.exists(nir_file):
+                            os.remove(nir_file)
+                        if os.path.exists(vis_file):
+                            os.remove(vis_file)
+                    except:
+                        pass
+                    
+                    time.sleep(1)  # Small delay between captures
+        
+        if best_settings:
+            print(f"\n=== Best Settings Found ===")
+            print(f"Target NDVI: {self.target_ndvi}")
+            print(f"Achieved NDVI difference: {best_ndvi_diff:.3f}")
+            print(f"Settings: {best_settings}")
+            
+            # Save calibration settings
+            self.save_calibration_settings(best_settings)
+            
+            return best_settings
+        else:
+            print("No suitable settings found")
+            return None
+
+    def save_calibration_settings(self, settings):
+        """Save calibration settings to file"""
+        calibration_file = "camera_calibration.json"
+        try:
+            with open(calibration_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+            print(f"Calibration settings saved to {calibration_file}")
+        except Exception as e:
+            print(f"Failed to save calibration settings: {e}")
+
     def capture_and_analyze(self, description):
         """Capture images from both cameras and analyze them"""
         print(f"\n=== {description} ===")
@@ -97,13 +200,7 @@ class CameraCalibrator:
                 nir_img = cv2.imread(nir_file)
                 vis_img = cv2.imread(vis_file)
                 
-                nir_gray = cv2.cvtColor(nir_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                vis_gray = cv2.cvtColor(vis_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                
-                # Calculate NDVI
-                denom = nir_gray + vis_gray
-                denom[denom == 0] = 0.01
-                ndvi = (nir_gray - vis_gray) / denom
+                ndvi = self.calculate_ndvi(nir_img, vis_img)
                 
                 print(f"\nNDVI Statistics:")
                 print(f"  Mean NDVI: {np.mean(ndvi):.3f}")
@@ -125,42 +222,45 @@ class CameraCalibrator:
 def main():
     calibrator = CameraCalibrator()
     
-    print("Camera Calibration Tool")
-    print("=======================")
-    print("This tool will help you understand your camera sensitivity.")
+    print("Enhanced Camera Calibration Tool")
+    print("================================")
+    print("This tool will help you find optimal camera settings for NDVI detection.")
     print("Follow the prompts to capture images under different conditions.")
     
     while True:
         print("\nOptions:")
-        print("1. Capture with halogen light (NIR source)")
-        print("2. Capture with natural sunlight")
-        print("3. Capture with indoor lighting")
-        print("4. Capture with plants in sunlight")
-        print("5. Capture with plants under halogen")
-        print("6. Exit")
+        print("1. Find optimal settings for NDVI=1 reference object")
+        print("2. Capture with halogen light (NIR source)")
+        print("3. Capture with natural sunlight")
+        print("4. Capture with indoor lighting")
+        print("5. Capture with plants in sunlight")
+        print("6. Capture with plants under halogen")
+        print("7. Exit")
         
-        choice = input("\nEnter your choice (1-6): ").strip()
+        choice = input("\nEnter your choice (1-7): ").strip()
         
         if choice == '1':
+            calibrator.find_optimal_settings()
+        elif choice == '2':
             input("Point cameras at halogen light, then press Enter...")
             calibrator.capture_and_analyze("Halogen Light (NIR Source)")
-        elif choice == '2':
+        elif choice == '3':
             input("Point cameras at natural sunlight, then press Enter...")
             calibrator.capture_and_analyze("Natural Sunlight")
-        elif choice == '3':
+        elif choice == '4':
             input("Point cameras at indoor lighting, then press Enter...")
             calibrator.capture_and_analyze("Indoor Lighting")
-        elif choice == '4':
+        elif choice == '5':
             input("Point cameras at plants in sunlight, then press Enter...")
             calibrator.capture_and_analyze("Plants in Sunlight")
-        elif choice == '5':
+        elif choice == '6':
             input("Point cameras at plants under halogen light, then press Enter...")
             calibrator.capture_and_analyze("Plants under Halogen")
-        elif choice == '6':
+        elif choice == '7':
             print("Exiting calibration tool.")
             break
         else:
-            print("Invalid choice. Please enter 1-6.")
+            print("Invalid choice. Please enter 1-7.")
 
 if __name__ == "__main__":
     main() 
